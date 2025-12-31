@@ -447,7 +447,28 @@ Time: {alert.transaction.timestamp.strftime('%I:%M%p')}
         message = f"""{emoji} *Suspicious Transaction*
 
 GHS {alert.transaction.amount:.2f} to {alert.transaction.counterparty[-4:]}
-
+# Add missing function to your whatsapp_fraud_webhook.py
+MISSING_FUNCTION = """
+def log_fraud_attempt(transaction, risk_score, reasons):
+    \"\"\"Log critical fraud attempts for analysis\"\"\"
+    fraud_log = {
+        'timestamp': transaction.timestamp.isoformat(),
+        'user_id': transaction.user_id,
+        'amount': transaction.amount,
+        'counterparty': transaction.counterparty,
+        'risk_score': risk_score,
+        'reasons': reasons,
+        'reference': transaction.reference
+    }
+    
+    # In production, save to database
+    print(f"[FRAUD LOG] {json.dumps(fraud_log, indent=2)}")
+    
+    # Also log to file
+    with open('fraud_logs.json', 'a') as f:
+        json.dump(fraud_log, f)
+        f.write('\\n')
+"""
 *Risk Score: {alert.risk_score}/100*
 
 *Reasons:*
