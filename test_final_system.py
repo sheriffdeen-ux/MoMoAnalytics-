@@ -7,6 +7,8 @@ Tests all features with Ghana providers
 import sys
 import json
 from datetime import datetime
+import os
+
 
 PASSED = 0
 FAILED = 0
@@ -40,7 +42,9 @@ try:
     # Set environment for testing
     import os
     os.environ['SECRET_KEY'] = 'test-secret-key-12345'
-    os.environ['ENCRYPTION_KEY'] = 'test-encryption-key-1234567890123456789012345678'
+    os.environ['ENCRYPTION_KEY'] = 'MXoahZZjlTRZDMfeFZ-scvaUA5a7D15tQpkwfdfRhvU='
+    os.environ['TELEGRAM_WEBHOOK_SECRET'] = 'test-webhook-secret'
+    os.environ['DATABASE_URL'] = 'sqlite://'
     
     from final_system import app, db, parse_sms, analyze_fraud, get_risk_level
     from final_system import BotUser, Transaction
@@ -276,7 +280,8 @@ try:
         }
         response = client.post('/telegram-webhook',
                               data=json.dumps(payload),
-                              content_type='application/json')
+                              content_type='application/json',
+                              headers={'X-Telegram-Bot-Api-Secret-Token': 'test-webhook-secret'})
         assert response.status_code == 200
         data = json.loads(response.data)
         assert data['status'] == 'success'
@@ -298,7 +303,8 @@ try:
         }
         response = client.post('/telegram-webhook',
                               data=json.dumps(payload),
-                              content_type='application/json')
+                              content_type='application/json',
+                              headers={'X-Telegram-Bot-Api-Secret-Token': 'test-webhook-secret'})
         assert response.status_code == 200
         data = json.loads(response.data)
         assert data['status'] == 'success'
@@ -318,7 +324,8 @@ try:
         }
         response = client.post('/telegram-webhook',
                               data=json.dumps(payload),
-                              content_type='application/json')
+                              content_type='application/json',
+                              headers={'X-Telegram-Bot-Api-Secret-Token': 'test-webhook-secret'})
         assert response.status_code == 200
         data = json.loads(response.data)
         assert data['status'] == 'command'
