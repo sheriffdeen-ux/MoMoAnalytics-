@@ -1,0 +1,13 @@
+name: Set Telegram Webhook After Deploy
+
+on:
+  deployment_status:
+
+jobs:
+  set-webhook:
+    if: github.event.deployment_status.state == 'success' && github.event.deployment.environment == 'Production'  # Adjust environment if needed
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Webhook Setup
+        run: |
+          curl -X GET "https://postgres-production-2b51.up.railway.app/set-telegram-webhook"
