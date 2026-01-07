@@ -1,6 +1,23 @@
+# Core
 Flask==3.0.0
-twilio==8.11.0
-python-dotenv==1.0.0
-requests==2.31.0
 gunicorn==21.2.0
 gevent==23.9.1
+
+# Database
+Flask-SQLAlchemy==3.1.1
+psycopg2-binary==2.9.9
+cryptography==41.0.7
+
+# Authentication
+Flask-Login==0.6.3
+
+# Rate Limiting
+Flask-Limiter==3.5.0
+redis==5.0.1
+
+# Security
+bleach==6.1.0
+
+# APIs
+requests==2.31.0
+twilio==8.11.0
