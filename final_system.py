@@ -376,7 +376,7 @@ def analyze_fraud(txn_data, bot_user):
     # Layer 1: Time-based (Ghana time - UTC+0)
     hour = datetime.utcnow().hour
     if hour in [2, 3, 4, 5]:  # Late night
-        score += 40
+        score += 30
         reasons.append(f"❗ Late night transaction: {hour}:00")
     elif hour in [22, 23, 0, 1]:  # Very late
         score += 20
