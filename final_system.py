@@ -294,16 +294,19 @@ def parse_sms(text, user_id):
     if not text:
         return None
     
-    # MTN patterns
-    mtn_sent = re.search(r'(?:sent|transferred)\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+(?:to|for)\s+(\d+)', text, re.I)
-    mtn_received = re.search(r'received\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+from\s+(\d+)', text, re.I)
-    
-    # Vodafone patterns
+    # Vodafone patterns (most specific first)
     voda_sent = re.search(r'You\s+sent\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+to\s+(\d+)', text, re.I)
     voda_received = re.search(r'You\s+received\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+from\s+(\d+)', text, re.I)
     
+    # MTN patterns
+    mtn_sent = re.search(r'You\s+have\s+sent\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+to\s+(\d+)', text, re.I)
+    mtn_received = re.search(r'You\s+have\s+received\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+from\s+(\d+)', text, re.I)
+
     # AirtelTigo patterns
-    airtel_sent = re.search(r'(?:paid|sent)\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)', text, re.I)
+    airtel_sent = re.search(r'You\s+paid\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\.', text, re.I)
+
+    # Generic patterns (less reliable)
+    generic_sent = re.search(r'sent\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)', text, re.I)
     
     # Balance extraction
     balance_match = re.search(r'balance[:\s]+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)', text, re.I)
@@ -318,67 +321,42 @@ def parse_sms(text, user_id):
     ref_match = re.search(r'(?:Ref|Reference|ID)[:\.]?\s*(\w+)', text, re.I)
     reference = ref_match.group(1)[:50] if ref_match else ""
     
-    # Detect provider
-    provider = 'Unknown'
-    if any(x in text.upper() for x in ['MTN', 'MOMO', 'MOBILEMONEY']):
-        provider = 'MTN MoMo'
-    elif any(x in text.upper() for x in ['VODAFONE', 'VODACASH']):
-        provider = 'Vodafone Cash'
-    elif any(x in text.upper() for x in ['AIRTEL', 'TIGO', 'AIRTELTIGO']):
-        provider = 'AirtelTigo Money'
-    
-    # Parse transaction
-    if mtn_sent or voda_sent:
-        match = mtn_sent or voda_sent
-        try:
-            amount = float(match.group(1).replace(',', ''))
-            if not validate_amount(amount):
-                return None
-            return {
-                'amount': amount,
-                'direction': 'out',
-                'counterparty': match.group(2)[:20] if match.lastindex >= 2 else '',
-                'reference': reference,
-                'balance': balance,
-                'provider': provider,
-                'raw_text': text
-            }
-        except:
-            return None
-    
-    elif mtn_received or voda_received:
-        match = mtn_received or voda_received
-        try:
-            amount = float(match.group(1).replace(',', ''))
-            if not validate_amount(amount):
-                return None
-            return {
-                'amount': amount,
-                'direction': 'in',
-                'counterparty': match.group(2)[:20] if match.lastindex >= 2 else '',
-                'reference': reference,
-                'balance': balance,
-                'provider': provider,
-                'raw_text': text
-            }
-        except:
-            return None
-    
+    # Parse transaction logic
+    match, provider, direction, counterparty_group = (None, 'Unknown', '', 0)
+
+    if voda_sent:
+        match, provider, direction, counterparty_group = (voda_sent, 'Vodafone Cash', 'out', 2)
+    elif voda_received:
+        match, provider, direction, counterparty_group = (voda_received, 'Vodafone Cash', 'in', 2)
+    elif mtn_sent:
+        match, provider, direction, counterparty_group = (mtn_sent, 'MTN MoMo', 'out', 2)
+    elif mtn_received:
+        match, provider, direction, counterparty_group = (mtn_received, 'MTN MoMo', 'in', 2)
     elif airtel_sent:
+        match, provider, direction, counterparty_group = (airtel_sent, 'AirtelTigo Money', 'out', 0)
+    elif generic_sent:
+         match, provider, direction, counterparty_group = (generic_sent, 'Unknown', 'out', 0)
+
+    if match:
         try:
-            amount = float(airtel_sent.group(1).replace(',', ''))
+            amount = float(match.group(1).replace(',', ''))
             if not validate_amount(amount):
                 return None
+
+            counterparty = ''
+            if counterparty_group > 0 and match.lastindex >= counterparty_group:
+                counterparty = match.group(counterparty_group)[:20]
+
             return {
                 'amount': amount,
-                'direction': 'out',
-                'counterparty': '',
+                'direction': direction,
+                'counterparty': counterparty,
                 'reference': reference,
                 'balance': balance,
                 'provider': provider,
                 'raw_text': text
             }
-        except:
+        except (ValueError, AttributeError):
             return None
     
     return None
@@ -398,7 +376,7 @@ def analyze_fraud(txn_data, bot_user):
     # Layer 1: Time-based (Ghana time - UTC+0)
     hour = datetime.utcnow().hour
     if hour in [2, 3, 4, 5]:  # Late night
-        score += 40
+        score += 30
         reasons.append(f"❗ Late night transaction: {hour}:00")
     elif hour in [22, 23, 0, 1]:  # Very late
         score += 20
