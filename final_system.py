@@ -15,7 +15,7 @@ Features:
 - API security
 """
 
-from flask import Flask, request, jsonify, render_template_string, session, redirect, url_for, flash, abort
+from flask import Flask, request, jsonify, render_template, session, redirect, url_for, flash, abort
 from flask_sqlalchemy import SQLAlchemy
 from flask_login import LoginManager, UserMixin, login_user, logout_user, login_required, current_user
 from flask_limiter import Limiter
@@ -294,16 +294,19 @@ def parse_sms(text, user_id):
     if not text:
         return None
     
-    # MTN patterns
-    mtn_sent = re.search(r'(?:sent|transferred)\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+(?:to|for)\s+(\d+)', text, re.I)
-    mtn_received = re.search(r'received\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+from\s+(\d+)', text, re.I)
-    
-    # Vodafone patterns
+    # Vodafone patterns (most specific first)
     voda_sent = re.search(r'You\s+sent\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+to\s+(\d+)', text, re.I)
     voda_received = re.search(r'You\s+received\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+from\s+(\d+)', text, re.I)
     
+    # MTN patterns
+    mtn_sent = re.search(r'You\s+have\s+sent\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+to\s+(\d+)', text, re.I)
+    mtn_received = re.search(r'You\s+have\s+received\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\s+from\s+(\d+)', text, re.I)
+
     # AirtelTigo patterns
-    airtel_sent = re.search(r'(?:paid|sent)\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)', text, re.I)
+    airtel_sent = re.search(r'You\s+paid\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)\.', text, re.I)
+
+    # Generic patterns (less reliable)
+    generic_sent = re.search(r'sent\s+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)', text, re.I)
     
     # Balance extraction
     balance_match = re.search(r'balance[:\s]+(?:GHS?|GH₵|₵)?\s?([\d,\.]+)', text, re.I)
@@ -318,67 +321,42 @@ def parse_sms(text, user_id):
     ref_match = re.search(r'(?:Ref|Reference|ID)[:\.]?\s*(\w+)', text, re.I)
     reference = ref_match.group(1)[:50] if ref_match else ""
     
-    # Detect provider
-    provider = 'Unknown'
-    if any(x in text.upper() for x in ['MTN', 'MOMO', 'MOBILEMONEY']):
-        provider = 'MTN MoMo'
-    elif any(x in text.upper() for x in ['VODAFONE', 'VODACASH']):
-        provider = 'Vodafone Cash'
-    elif any(x in text.upper() for x in ['AIRTEL', 'TIGO', 'AIRTELTIGO']):
-        provider = 'AirtelTigo Money'
-    
-    # Parse transaction
-    if mtn_sent or voda_sent:
-        match = mtn_sent or voda_sent
-        try:
-            amount = float(match.group(1).replace(',', ''))
-            if not validate_amount(amount):
-                return None
-            return {
-                'amount': amount,
-                'direction': 'out',
-                'counterparty': match.group(2)[:20] if match.lastindex >= 2 else '',
-                'reference': reference,
-                'balance': balance,
-                'provider': provider,
-                'raw_text': text
-            }
-        except:
-            return None
-    
-    elif mtn_received or voda_received:
-        match = mtn_received or voda_received
-        try:
-            amount = float(match.group(1).replace(',', ''))
-            if not validate_amount(amount):
-                return None
-            return {
-                'amount': amount,
-                'direction': 'in',
-                'counterparty': match.group(2)[:20] if match.lastindex >= 2 else '',
-                'reference': reference,
-                'balance': balance,
-                'provider': provider,
-                'raw_text': text
-            }
-        except:
-            return None
-    
+    # Parse transaction logic
+    match, provider, direction, counterparty_group = (None, 'Unknown', '', 0)
+
+    if voda_sent:
+        match, provider, direction, counterparty_group = (voda_sent, 'Vodafone Cash', 'out', 2)
+    elif voda_received:
+        match, provider, direction, counterparty_group = (voda_received, 'Vodafone Cash', 'in', 2)
+    elif mtn_sent:
+        match, provider, direction, counterparty_group = (mtn_sent, 'MTN MoMo', 'out', 2)
+    elif mtn_received:
+        match, provider, direction, counterparty_group = (mtn_received, 'MTN MoMo', 'in', 2)
     elif airtel_sent:
+        match, provider, direction, counterparty_group = (airtel_sent, 'AirtelTigo Money', 'out', 0)
+    elif generic_sent:
+         match, provider, direction, counterparty_group = (generic_sent, 'Unknown', 'out', 0)
+
+    if match:
         try:
-            amount = float(airtel_sent.group(1).replace(',', ''))
+            amount = float(match.group(1).replace(',', ''))
             if not validate_amount(amount):
                 return None
+
+            counterparty = ''
+            if counterparty_group > 0 and match.lastindex >= counterparty_group:
+                counterparty = match.group(counterparty_group)[:20]
+
             return {
                 'amount': amount,
-                'direction': 'out',
-                'counterparty': '',
+                'direction': direction,
+                'counterparty': counterparty,
                 'reference': reference,
                 'balance': balance,
                 'provider': provider,
                 'raw_text': text
             }
-        except:
+        except (ValueError, AttributeError):
             return None
     
     return None
@@ -398,7 +376,7 @@ def analyze_fraud(txn_data, bot_user):
     # Layer 1: Time-based (Ghana time - UTC+0)
     hour = datetime.utcnow().hour
     if hour in [2, 3, 4, 5]:  # Late night
-        score += 40
+        score += 30
         reasons.append(f"❗ Late night transaction: {hour}:00")
     elif hour in [22, 23, 0, 1]:  # Very late
         score += 20
@@ -723,7 +701,7 @@ def login():
             log_audit('failed_login', f'Failed login for {username}')
             flash('Invalid credentials', 'error')
     
-    return render_template_string(LOGIN_TEMPLATE)
+    return render_template('login.html')
 
 @app.route('/logout')
 @login_required
@@ -775,7 +753,7 @@ def register():
         flash('Registration successful! Please login.', 'success')
         return redirect(url_for('login'))
     
-    return render_template_string(REGISTER_TEMPLATE)
+    return render_template('register.html')
 
 # ============================================================================
 # WEB ROUTES - DASHBOARD
@@ -806,8 +784,8 @@ def dashboard():
         db.func.date(Transaction.timestamp) == today
     ).count()
     
-    return render_template_string(
-        DASHBOARD_TEMPLATE,
+    return render_template(
+        'dashboard.html',
         total_users=total_users,
         total_txns=total_txns,
         fraud_detected=len(high_risk),
@@ -1039,101 +1017,6 @@ def health():
         "transactions": Transaction.query.count()
     }), 200 if db_status == "healthy" else 503
 
-# ============================================================================
-# TEMPLATES (Simplified for space)
-# ============================================================================
-
-LOGIN_TEMPLATE = """
-<!DOCTYPE html>
-<html><head><title>Login - MoMo Analytics Ghana</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: 20px; }
-.container { background: white; border-radius: 20px; padding: 40px; max-width: 400px; width: 100%; box-shadow: 0 20px 60px rgba(0,0,0,0.3); }
-h1 { color: #667eea; margin-bottom: 30px; text-align: center; }
-.form-group { margin-bottom: 20px; }
-.form-group label { display: block; margin-bottom: 8px; font-weight: bold; color: #333; }
-.form-group input { width: 100%; padding: 12px; border: 2px solid #e2e8f0; border-radius: 8px; font-size: 16px; }
-.btn { width: 100%; padding: 14px; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; border: none; border-radius: 8px; font-size: 16px; font-weight: bold; cursor: pointer; }
-.alert { padding: 12px; border-radius: 8px; margin-bottom: 20px; }
-.alert-error { background: #fed7d7; color: #742a2a; }
-.alert-success { background: #c6f6d5; color: #22543d; }
-.register-link { text-align: center; margin-top: 20px; color: #666; }
-.register-link a { color: #667eea; text-decoration: none; font-weight: bold; }
-</style></head><body>
-<div class="container">
-<h1>🇬🇭 MoMo Analytics Ghana</h1>
-{% with messages = get_flashed_messages(with_categories=true) %}
-{% if messages %}
-{% for category, message in messages %}
-<div class="alert alert-{{ category }}">{{ message }}</div>
-{% endfor %}
-{% endif %}
-{% endwith %}
-<form method="POST">
-<div class="form-group"><label>Username</label><input type="text" name="username" required autofocus></div>
-<div class="form-group"><label>Password</label><input type="password" name="password" required></div>
-<button type="submit" class="btn">Login</button>
-</form>
-<div class="register-link">Don't have an account? <a href="{{ url_for('register') }}">Register</a></div>
-</div></body></html>
-"""
-
-REGISTER_TEMPLATE = LOGIN_TEMPLATE.replace('Login', 'Register').replace('<h1>🇬🇭 MoMo Analytics Ghana</h1>', '<h1>🇬🇭 Register</h1>').replace('<form method="POST">', '<form method="POST"><div class="form-group"><label>Email</label><input type="email" name="email" required></div>').replace('</form>', '<div class="form-group"><label>Confirm Password</label><input type="password" name="password_confirm" required></div></form>').replace('Already', 'Already').replace('register', 'login')
-
-DASHBOARD_TEMPLATE = """
-<!DOCTYPE html>
-<html><head><title>Dashboard - MoMo Analytics Ghana</title>
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<style>
-* { margin: 0; padding: 0; box-sizing: border-box; }
-body { font-family: -apple-system, sans-serif; background: #f5f5f5; }
-.header { background: white; padding: 20px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; }
-.header h1 { color: #667eea; }
-.logout-btn { padding: 8px 16px; background: #f56565; color: white; text-decoration: none; border-radius: 6px; }
-.container { max-width: 1200px; margin: 20px auto; padding: 0 20px; }
-.stats-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(250px, 1fr)); gap: 20px; margin-bottom: 30px; }
-.stat-card { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); }
-.stat-card .label { color: #718096; font-size: 14px; margin-bottom: 10px; }
-.stat-card .value { color: #2d3748; font-size: 36px; font-weight: bold; }
-.section { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 2px 8px rgba(0,0,0,0.1); margin-bottom: 20px; }
-.transaction { padding: 15px; border-left: 4px solid #667eea; background: #f7fafc; margin-bottom: 10px; border-radius: 6px; }
-.transaction.out { border-left-color: #f56565; }
-.transaction.in { border-left-color: #48bb78; }
-.risk-badge { display: inline-block; padding: 4px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; }
-.risk-low { background: #c6f6d5; color: #22543d; }
-.risk-medium { background: #feebc8; color: #7c2d12; }
-.risk-high { background: #fed7d7; color: #742a2a; }
-.risk-critical { background: #fc8181; color: white; }
-</style></head><body>
-<div class="header">
-<h1>🇬🇭 MoMo Analytics Ghana</h1>
-<div><span>{{ current_user.username }}{% if current_user.is_admin %} (Admin){% endif %}</span> | <a href="{{ url_for('logout') }}" class="logout-btn">Logout</a></div>
-</div>
-<div class="container">
-<div class="stats-grid">
-<div class="stat-card"><div class="label">Total Users</div><div class="value">{{ total_users }}</div></div>
-<div class="stat-card"><div class="label">Transactions</div><div class="value">{{ total_txns }}</div></div>
-<div class="stat-card"><div class="label">Fraud Detected</div><div class="value">{{ fraud_detected }}</div></div>
-<div class="stat-card"><div class="label">Money Protected</div><div class="value">{{ currency }} {{ money_protected }}</div></div>
-</div>
-<div class="section">
-<h2>Recent Transactions</h2>
-{% if recent_transactions %}
-{% for txn in recent_transactions %}
-<div class="transaction {{ txn.direction }}">
-<div style="display: flex; justify-content: space-between; align-items: center;">
-<div><strong>{{ currency }} {{ "%.2f"|format(txn.amount) }}</strong> <span style="color: #718096;">• {{ txn.provider }} • {{ txn.timestamp.strftime('%Y-%m-%d %H:%M') }}</span></div>
-<span class="risk-badge risk-{{ txn.risk_level|lower }}">{{ txn.risk_level }} ({{ txn.risk_score }})</span>
-</div></div>
-{% endfor %}
-{% else %}
-<p style="color: #718096; text-align: center; padding: 40px;">No transactions yet</p>
-{% endif %}
-</div>
-</div></body></html>
-"""
 
 # ============================================================================
 # DATABASE INITIALIZATION
